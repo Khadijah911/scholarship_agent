@@ -4,7 +4,7 @@ The Story Behind This Project
 
 I have personally gone through the scholarship application process  across different degree levels. And every single time, it felt like I was solving a puzzle with missing pieces.
 
-Finding the right university, figuring out their exact GPA requirement, hunting down application deadlines buried in PDF documents, identifying which professors align with your research interests, and then on top of all that — searching for scholarships that actually apply to you as an international student. It is exhausting. It is time-consuming. And most of the time, you are doing it alone, with dozens of browser tabs open and notes scattered everywhere.
+Finding the right university, figuring out their exact GPA requirement, hunting down application deadlines buried in PDF documents, identifying which professors align with your research interests, and then on top of all that, searching for scholarships that actually apply to you as an international student. It is exhausting. It is time-consuming. And most of the time, you are doing it alone, with dozens of browser tabs open and notes scattered everywhere.
 
 I built this ScholarshipAgent because I wished something like this existed when I was going through it. A tool that does not just point you to a website but actually reads it, extracts what matters, and talks to you like a knowledgeable friend who has done all the research already.
 
