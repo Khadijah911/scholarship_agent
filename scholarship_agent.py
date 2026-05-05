@@ -63,6 +63,8 @@ class ScholarshipSystemState(TypedDict):
     is_complete: bool
     application_progress: Dict[str, str]
     errors: List[str]
+    tracked_applications: List[Dict[str, Any]]
+    tracker_export_path: Optional[str]
 
 # profile questions
 PROFILE_QUESTIONS = {
@@ -73,21 +75,27 @@ PROFILE_QUESTIONS = {
 }
 
 # tools
+
+
 def search_scholarships(field_of_study, country, degree_level, target_country="USA", num_results=5):
     queries = [
-        f"{field_of_study} {degree_level} scholarships {target_country} for {country} students",
-        f"fully funded {field_of_study} {degree_level} programs {target_country}",
-        f"{target_country} scholarships international students {field_of_study}"
-    ]
+    f"{field_of_study} {degree_level} scholarships {target_country} for {country} students",
+    f"fully funded {field_of_study} {degree_level} programs {target_country}",
+    f"{target_country} universities fully funded {degree_level} {field_of_study} international students",
+    f"best {target_country} universities {field_of_study} {degree_level} full funding stipend"
+]
     print(f" Target country: {target_country}")
+
     all_scholarships = []
 
     for i, query in enumerate(queries, 1):
-        print(f"\n Query {i}/3: {query}")
+        print(f"\n Query {i}/4: {query}")
+
         response = tavily_client.search(
             query=query,
             max_results=num_results,
-            search_depth="advanced" )
+            search_depth="advanced"
+        )
 
         results = response.get("results", [])
 
@@ -100,31 +108,59 @@ def search_scholarships(field_of_study, country, degree_level, target_country="U
                     "source":         result.get("url", "Unknown"),
                     "field":          field_of_study,
                     "degree_level":   degree_level,
-                    "target_country": target_country
+                    "target_country": target_country,
+                    "raw_content":    result.get("content", "")
                 }
                 all_scholarships.append(scholarship_data)
                 print(f" {result['title'][:70]}")
         else:
             print(f" No results for this query")
-
     return all_scholarships
+
+results = search_scholarships(
+    field_of_study="Computer Science",
+    country="Nigeria",
+    degree_level="Masters",
+    target_country="USA",
+    num_results=3
+)
+
+if results:
+    print(f"\n Sample result:")
+    print(f"  Name:        {results[0]['name']}")
+    print(f"  URL:         {results[0]['url']}")
+    print(f"  Description: {results[0]['description'][:150]}")
 
 # PROMPTS
 
 SCHOLARSHIP_ADVISOR_PROMPT = """You are an intelligent Scholarship Advisor Agent.
-Your role is to help users discover, filter, rank, and recommend scholarships based on their needs. You do not simply return raw data, you analyze, compare, and suggest the best options.
+Your role is to help users discover, filter, rank, and recommend scholarships based on their needs.
 
 Your responsibilities:
 1. UNDERSTAND USER INTENT - Extract constraints such as number, funding type, country, field, requirements
 2. FILTER RESULTS - Apply all user constraints strictly
 3. RANK & RECOMMEND - Rank by funding level, relevance, deadline urgency, benefits
 4. PERSONALIZE - Tailor recommendations to user background
-5. EXPLAIN RESULTS CLEARLY - For each scholarship: name, country, funding type, key benefits, why it matches
-6. BE TRANSPARENT - If data is missing, say so. Do not hallucinate requirements.
+5. ALWAYS LIST THE ACTUAL UNIVERSITY OR ORGANIZATION NAME - Never use the webpage title as the scholarship name
 
-CRITICAL: Only state benefits and requirements explicitly mentioned in the scholarship data provided.
-If a detail is not in the data, say "details not available - check official website" rather than guessing.
-Never invent specific figures or requirements.
+CRITICAL FORMATTING RULES:
+- Always extract and display the ACTUAL university or institution name (e.g. "MIT", "University of Toronto")
+- Never use webpage titles like "Top 25 Scholarships in Canada" as a scholarship name
+- If the source is a list page, extract individual scholarships/universities FROM that page
+- For each result show: University/Organization name, country, funding type, key benefits, why it matches
+- If a detail is not in the data say "not specified — check official website"
+- Never invent requirements or benefits
+
+EXAMPLE OF GOOD OUTPUT:
+1. University of Toronto — Fully Funded MSc in Computer Science
+   Country: Canada
+   Funding: Fully funded (tuition + stipend)
+   Benefits: Research assistantship, living allowance
+   Why it matches: ...
+
+EXAMPLE OF BAD OUTPUT:
+1. Top 25 Fully Funded Scholarships In Canada 2026
+   (This is a webpage title, not a real scholarship name — never do this)
 """
 REQUIREMENTS_ADVISOR_PROMPT = """You are an intelligent University Requirements Advisor
 helping a student understand and compare admission requirements clearly.
@@ -158,16 +194,30 @@ def supervisor_node(state):
         f"{m['role'].upper()}: {m['content'][:200]}"
         for m in history_messages
     )
+
     prompt = f"""
     A student is using a scholarship advisor chatbot.
     Classify their message into exactly one of these intents:
     "find_scholarships"  -> they want scholarship recommendations OR are asking
                              a follow-up question about scholarships already shown
+                             (e.g., "find me scholarships in Germany",
+                             "which of those don't require IELTS?",
+                             "tell me more about the second one")
     "check_requirements" -> they want university admission requirements
+                             (e.g., "what do I need to apply to MIT")
     "find_faculty"       -> they want to find professors or faculty to contact
+                             (e.g., "find faculty at Harvard working on NLP")
     "general_chat"      ->  greeting, thanks, or unrelated question
+                             (e.g., "hi", "thanks", "how are you?")
+    "track_application" -> they want to add, update, show or export their application tracker
+                             (e.g., "add scholarship 1 to my tracker",
+                             "show my tracker", "update scholarship 2 to Submitted",
+                             "export my tracker")
 
-    Use the conversation history to understand context.
+    Use the conversation history to understand context, a short follow-up message
+    like "which ones are fully funded?" should be classified based on what was
+    discussed before, not just the message alone.
+
     Conversation history:
     {history_text}
 
@@ -178,7 +228,7 @@ def supervisor_node(state):
     try:
         response = llm.invoke([HumanMessage(content=prompt)])
         intent   = response.content.strip().strip('"')
-        valid_intents = ["find_scholarships", "check_requirements", "find_faculty", "general_chat"]
+        valid_intents = ["find_scholarships", "check_requirements", "find_faculty", "general_chat","track_application"]
         if intent not in valid_intents:
             print(f" Supervisor returned invalid intent '{intent}' defaulting to general_chat")
             intent = "general_chat"
@@ -205,7 +255,10 @@ def route_from_supervisor(state):
         return "requirements_agent"
     if intent == "find_faculty":
         return "faculty_agent"
+    if intent == "track_application":
+        return "tracker_agent"
     return END
+
 
 # OPPORTUNITY AGENT
 def opportunity_agent(state: ScholarshipSystemState) -> ScholarshipSystemState:
@@ -359,6 +412,7 @@ Do not hallucinate requirements or benefits.
 
     return state
 # REQUIREMENTS SEARCH
+
 def search_requirements(university=None, program=None, degree_level="Masters", state=None, num_results=5):
 
     if state is None:
@@ -603,6 +657,7 @@ Return ONLY this exact JSON object — no markdown fences, no commentary:
 # REQUIREMENTS AGENT
 def requirements_agent(state: ScholarshipSystemState) -> ScholarshipSystemState:
     import json
+    import re
     print(" RequirementsAgent starting...")
 
     user_profile    = state["user_profile"]
@@ -860,41 +915,57 @@ Instructions:
     return state
 
 # Faculty search
-def search_faculty_by_research_area(university, program, user_research_area, num_results=5):
+def search_faculty_by_research_area(
+    university: str,
+    program: str,
+    user_research_area: str,
+    num_results: int = 5,
+) -> list[dict]:
     queries = [
         f"{university} {program} professor {user_research_area}",
         f"{university} faculty {user_research_area} research lab",
         f"{university} {program} {user_research_area} research group members",
-        f"{university} computer science {user_research_area} faculty publications",
+        f"{university} {user_research_area} faculty site:ox.ac.uk OR site:cam.ac.uk OR site:ed.ac.uk",
+        f"{university} professor {user_research_area} profile email",
     ]
+
     candidates = []
     seen_urls  = set()
+
     for query in queries:
         print(f"  [Step 0] {query}")
+
         response = tavily_client.search(
             query=query,
             max_results=num_results,
-            search_depth="advanced")
+            search_depth="advanced"
+        )
 
         organic = response.get("results", [])
+        # chiosing to prioritise university domain results first
         organic.sort(key=lambda r: (
-            0 if f"cs.{university.lower()}.edu" in r.get("url", "") else 1 ))
+            0 if f"cs.{university.lower()}.edu" in r.get("url", "") else 1
+        ))
 
         for r in organic:
             url  = r.get("url", "")
             name = r.get("title", "")
-            profile_keywords = ["/faculty/", "/people/", "/profile/", "/person/",
-                                 "/staff/", "/~", "/bio/"]
-            is_profile = any(kw in url.lower() for kw in profile_keywords)
-            is_scholar  = "scholar.google.com/citations" in url
 
-            if (is_profile or is_scholar) and url not in seen_urls:
+            profile_keywords = ["/faculty/", "/people/", "/profile/", "/person/",
+                                 "/staff/", "/~", "/bio/", "/researcher/", "/academic/"]
+            is_profile = any(kw in url.lower() for kw in profile_keywords)
+            is_scholar = "scholar.google.com/citations" in url
+            is_uk_academic = ".ac.uk" in url
+
+            if (is_profile or is_scholar or is_uk_academic) and url not in seen_urls:
                 seen_urls.add(url)
                 candidates.append({"name": name, "url": url, "source": "direct_search"})
                 print(f" {name[:70]}")
 
     print(f" Step 0 found {len(candidates)} direct candidates")
     return candidates
+
+
 
 def resolve_scholar_url(name, university, program):
     clean_name = name.split(" - ")[0].split(" | ")[0].strip()
@@ -1186,9 +1257,17 @@ def _fetch_direct_candidates(candidates, university, program):
         time.sleep(0.5)
     return extracted
 
-def search_faculty(university, program, user_research_area, top_n=5):
-    print(f"\n Searching faculty: {university} - {program}")
-    print(f"   Research area: '{user_research_area}'\n")
+# the main search function
+
+def search_faculty(
+    university: str,
+    program: str,
+    user_research_area: str,
+    top_n: int = 5,
+) -> list[dict]:
+    print(f"\n Searching faculty: {university} — {program}")
+    print(f"   Research area (from message): '{user_research_area}'\n")
+
 
     print(" Step 0: Targeted research-area search...")
     direct_candidates = search_faculty_by_research_area(
@@ -1206,15 +1285,20 @@ def search_faculty(university, program, user_research_area, top_n=5):
         best_links      = []
 
         for result in directory_results:
-            url = result["url"]
-            blocked = ["wikipedia.org", "linkedin.com", "github.io", "wgetsnaps", "github.com"]
+            url     = result["url"]
+            blocked = ["wikipedia.org", "linkedin.com", "github.io",
+                       "wgetsnaps", "github.com"]
             if any(b in url for b in blocked):
+                print(f" Skipping blocked directory: {url[:60]}")
                 continue
-            if ".edu" not in url:
+            if ".edu" not in url and ".ac.uk" not in url:
+                print(f"   Skipping non-.edu directory: {url[:60]}")
                 continue
+
             print(f" Testing: {url[:70]}")
             test_links = extract_faculty_links(url)
             print(f"      → {len(test_links)} profile links found")
+
             if len(test_links) > best_link_count:
                 best_link_count = len(test_links)
                 best_directory  = result
@@ -1226,20 +1310,30 @@ def search_faculty(university, program, user_research_area, top_n=5):
             directory_url = best_directory["url"]
             all_links     = best_links
             print(f"   Best directory: {directory_url} ({best_link_count} links)")
+            print(f"\n Step 2: Using {len(all_links)} links from best directory")
 
             if not all_links:
-                print("  No links found - page may be JS-rendered")
+                print("  No links found — page may be JS-rendered")
+
             elif len(all_links) < 10:
-                print(f"   Only {len(all_links)} links - switching to flat-list extraction")
+                print(f"   Only {len(all_links)} links — switching to flat-list extraction")
                 page_text = fetch_page_text(directory_url)
+
                 if len(page_text) > 200:
                     flat_faculty = llm_extract_flat_directory(page_text, directory_url)
+
                     if flat_faculty:
                         flat_faculty = [f for f in flat_faculty if f.get("research_interests")]
+                        print(f" Flat extraction: {len(flat_faculty)} faculty with research interests")
+
                         for f in flat_faculty:
                             f["source"] = "flat_directory"
-                        step0_extracted = _fetch_direct_candidates(direct_candidates, university, program)
+
+                        step0_extracted = _fetch_direct_candidates(
+                            direct_candidates, university, program
+                        )
                         all_extracted = step0_extracted + flat_faculty
+
                         seen_names = {}
                         for entry in all_extracted:
                             name = entry.get("name", "").strip().lower()
@@ -1248,18 +1342,27 @@ def search_faculty(university, program, user_research_area, top_n=5):
                             existing = seen_names.get(name)
                             if not existing or len(entry.get("research_interests", [])) > len(existing.get("research_interests", [])):
                                 seen_names[name] = entry
+
                         all_extracted = list(seen_names.values())
+                        print(f" {len(all_extracted)} unique faculty to rank")
+
                         matched = llm_rank_faculty(all_extracted, user_research_area, top_n=top_n)
+                        print(f"\n Done — {len(matched)} matched faculty for {university}")
                         return matched
+                else:
+                    print("  Directory page too short — relying on Step 0 only")
+
             else:
                 print("\n Step 3: Batched LLM shortlisting...")
                 directory_candidates = llm_shortlist_batched(
-                    all_links, user_research_area,
-                    top_n_per_batch=3, final_top_n=8, batch_size=30,
+                    all_links,
+                    user_research_area,
+                    top_n_per_batch=3,
+                    final_top_n=8,
+                    batch_size=30,
                 )
     else:
         print(" Could not find a faculty directory.")
-
     print("\n Step 4: Merging direct hits + directory shortlist...")
     seen_urls      = set()
     all_candidates = []
@@ -1268,6 +1371,10 @@ def search_faculty(university, program, user_research_area, top_n=5):
         if c["url"] not in seen_urls:
             seen_urls.add(c["url"])
             all_candidates.append(c)
+
+    print(f"  {len(all_candidates)} unique candidates to profile "
+          f"({len(direct_candidates)} direct + "
+          f"{len([c for c in all_candidates if c.get('source')=='directory'])} from directory)")
 
     if not all_candidates:
         print("  No candidates found at all.")
@@ -1283,16 +1390,20 @@ def search_faculty(university, program, user_research_area, top_n=5):
         name = candidate.get("name", "")
 
         if "scholar.google.com" in url:
+            print(f"  [{i+1}/{len(all_candidates)}] Scholar URL — resolving...")
             resolved_url = resolve_scholar_url(name, university, program)
             if resolved_url:
                 url = resolved_url
             else:
+                print(f" Could not resolve: {name[:60]}")
                 continue
 
         print(f"  [{i+1}/{len(all_candidates)}] {url[:80]}")
         page_text = fetch_page_text(url)
 
         if len(page_text) < 200:
+
+            print(f" Page too short ({len(page_text)} chars) — trying Tavily fallback...")
             try:
                 fallback = tavily_client.search(
                     f"{name} {university} professor research interests",
@@ -1300,6 +1411,7 @@ def search_faculty(university, program, user_research_area, top_n=5):
                     search_depth="advanced"
                 )
                 page_text = fallback["results"][0]["content"] if fallback["results"] else ""
+                print(f"    {'Tavily fallback succeeded' if len(page_text) > 200 else ' Tavily fallback also too short'}")
             except Exception as e:
                 print(f" Tavily fallback failed: {e}")
                 continue
@@ -1311,10 +1423,13 @@ def search_faculty(university, program, user_research_area, top_n=5):
         if profile_data and profile_data.get("name"):
             profile_data["source"] = candidate.get("source", "unknown")
             extracted_faculty.append(profile_data)
-            print(f" {profile_data['name']} — {profile_data.get('research_interests', [])[:2]}")
+            interests = profile_data.get("research_interests", [])
+            print(f" {profile_data['name']} — {interests[:2]}")
 
         time.sleep(0.5)
 
+
+    print(f"\n Deduplicating {len(extracted_faculty)} extracted profiles by name...")
     seen_names = {}
     for entry in extracted_faculty:
         name = entry.get("name", "").strip().lower()
@@ -1323,10 +1438,13 @@ def search_faculty(university, program, user_research_area, top_n=5):
         if name not in seen_names:
             seen_names[name] = entry
         else:
-            if len(entry.get("research_interests", [])) > len(seen_names[name].get("research_interests", [])):
+            existing_len = len(seen_names[name].get("research_interests", []))
+            new_len      = len(entry.get("research_interests", []))
+            if new_len > existing_len:
                 seen_names[name] = entry
 
     extracted_faculty = list(seen_names.values())
+    print(f" {len(extracted_faculty)} unique faculty after deduplication")
 
     if not extracted_faculty:
         print(" Could not extract any faculty profiles.")
@@ -1334,9 +1452,10 @@ def search_faculty(university, program, user_research_area, top_n=5):
 
     print(f"\n Step 6: Ranking {len(extracted_faculty)} extracted profiles...")
     matched = llm_rank_faculty(extracted_faculty, user_research_area, top_n=top_n)
+
     print(f"\n Done: {len(matched)} matched faculty for {university}")
     return matched
-
+    
 # FACULTY AGENT
 def faculty_agent(state: ScholarshipSystemState) -> ScholarshipSystemState:
     print(" FacultyAgent starting...\n")
@@ -1348,25 +1467,33 @@ def faculty_agent(state: ScholarshipSystemState) -> ScholarshipSystemState:
         (m["content"] for m in reversed(state["messages"]) if m["role"] == "user"),
         ""
     )
+
+    # Extracting researh area from the message
     area_prompt_llm = f"""
 Extract the specific research area mentioned in this message.
 Reply with ONLY the research area (e.g. "NLP", "computer vision", "robotics").
-If no research area is mentioned, reply with exactly: NONE
+If no research area is mentioned at all, reply with exactly: NONE
 
 User message: "{current_message}"
 """
     try:
         area_response = llm.invoke([HumanMessage(content=area_prompt_llm)])
         user_research_area_from_message = area_response.content.strip()
+
         if not user_research_area_from_message or user_research_area_from_message.upper() == "NONE":
             user_research_area = user_profile.get("research_interests", "machine learning")
+            print(f" Research area: '{user_research_area}' (from profile fallback)")
         else:
             user_research_area = user_research_area_from_message
+            print(f" Research area: '{user_research_area}' (from message)")
     except Exception as e:
+        print(f" Could not extract research area from message: {e} — defaulting to profile.")
         user_research_area = user_profile.get("research_interests", "machine learning")
 
+    #  Extract the name of universities from the message
     prompt_universities = f"""
-    Extract all university names mentioned in this message.
+    A student is asking about faculty members.
+    Extract all university names mentioned in their message.
     Return ONLY a JSON array of university names, nothing else.
     If no universities are mentioned, return an empty array [].
 
@@ -1381,22 +1508,29 @@ User message: "{current_message}"
             if raw_universities.startswith("json"):
                 raw_universities = raw_universities[4:]
         extracted_universities = json.loads(raw_universities.strip())
+        print(f" Universities extracted: {extracted_universities}")
     except Exception as e:
         print(f" Could not extract universities from message: {e}")
 
+    # Merge with any already in state
     universities = list(set(state.get("universities", []) + extracted_universities))
 
     if not universities:
+        print(" No universities found")
         state["messages"].append({
             "role":    "assistant",
             "content": "Please tell me which universities you'd like to find faculty at. For example: 'Find me faculty at MIT and Stanford'"
         })
         return state
 
+
     state["current_agent"] = "faculty"
     state["current_step"]  = "searching"
 
     all_matched_faculty = {}
+    print(f" Final search params — University: {universities}, Research area: '{user_research_area}', Program: '{program}'")
+
+
     for university in universities:
         print(f" Processing: {university}")
         matched = search_faculty(
@@ -1412,8 +1546,182 @@ User message: "{current_message}"
 
     total = sum(len(v) for v in all_matched_faculty.values())
     print(f"\n FacultyAgent done! Matched {total} faculty across {len(universities)} universities")
+
     return state
 
+
+def tracker_agent(state: ScholarshipSystemState) -> ScholarshipSystemState:
+    print(" TrackerAgent starting...")
+
+    current_message = next(
+        (m["content"] for m in reversed(state["messages"]) if m["role"] == "user"),
+        ""
+    )
+    scholarships_found = state.get("scholarships_found", [])
+    tracked = state.get("tracked_applications", [])
+
+    # Step 1 — figure out what the user wants to do
+    intent_prompt = f"""
+    A user is interacting with a scholarship application tracker.
+    Classify their message into exactly one of these:
+    "add"    -> they want to add scholarships to their tracker
+    "update" -> they want to update the status of a scholarship
+    "show"   -> they want to see their tracker
+    "export" -> they want to download their tracker as Excel
+
+    Reply with ONLY the intent word, nothing else.
+
+    User message: "{current_message}"
+    """
+    try:
+        intent_response = llm.invoke([HumanMessage(content=intent_prompt)])
+        tracker_intent = intent_response.content.strip().lower()
+        print(f" Tracker intent: {tracker_intent}")
+    except Exception as e:
+        print(f" Could not detect tracker intent: {e}")
+        tracker_intent = "show"
+
+    # Step 2 — ADD scholarships to tracker
+    if tracker_intent == "add":
+        # Get the last advisor message to match what user actually saw
+        last_advisor_msg = next(
+       (m["content"] for m in reversed(state["messages"]) if m["role"] == "assistant"),
+            ""
+        )
+
+        extract_prompt = f"""
+        The user wants to add specific scholarships to their tracker.
+        Below is what was shown to the user and the raw scholarship data.
+        Match what the user saw (numbered list) to the raw data and return the correct indices.
+        Return ONLY a JSON array of integers matching the raw data indices, e.g. [1, 3].
+        If they said "all", return all numbers.
+
+        What the user saw:
+        {last_advisor_msg[:2000]}
+
+        Raw scholarships (use these indices):
+        {json.dumps([{"index": i+1, "name": s["name"]} for i, s in enumerate(scholarships_found)], indent=2)}
+
+        User message: "{current_message}"
+        """
+        try:
+            extract_response = llm.invoke([HumanMessage(content=extract_prompt)])
+            raw = extract_response.content.strip()
+            if raw.startswith("```"):
+                raw = raw.split("```")[1]
+                if raw.startswith("json"):
+                    raw = raw[4:]
+            indices = json.loads(raw.strip())
+        except Exception as e:
+            print(f" Could not extract indices: {e}")
+            indices = []
+
+        added = []
+        existing_names = [t["name"] for t in tracked]
+
+        for idx in indices:
+            if 1 <= idx <= len(scholarships_found):
+                s = scholarships_found[idx - 1]
+                if s["name"] not in existing_names:
+                    tracked.append({
+                        "name":       s["name"],
+                        "url":        s.get("url", ""),
+                        "country":    s.get("target_country", ""),
+                        "field":      s.get("field", ""),
+                        "deadline":   "Not specified",
+                        "status":     "Research",
+                        "documents":  [],
+                        "notes":      "",
+                        "date_added": datetime.now().strftime("%Y-%m-%d")
+                    })
+                    added.append(s["name"])
+
+        state["tracked_applications"] = tracked
+
+        if added:
+            response = f"Added {len(added)} scholarship(s) to your tracker:\n"
+            for name in added:
+                response += f"- {name}\n"
+            response += "\nAll set to status: **Research**. Say 'show my tracker' to see everything."
+        else:
+            response = "No new scholarships were added. They may already be in your tracker or the numbers didn't match."
+
+        state["messages"].append({"role": "assistant", "content": response})
+
+    # Step 3 — UPDATE status
+    elif tracker_intent == "update":
+        update_prompt = f"""
+        The user wants to update the status of a tracked scholarship.
+        Extract the scholarship name (or number) and the new status.
+        Valid statuses are: Research, Documents, Essay, Submitted, Interview, Accepted, Rejected
+
+        Current tracked scholarships:
+        {json.dumps([{"index": i+1, "name": t["name"], "status": t["status"]} for i, t in enumerate(tracked)], indent=2)}
+
+        User message: "{current_message}"
+
+        Return ONLY a JSON object like:
+        {{"index": 1, "new_status": "Submitted"}}
+        """
+        try:
+            update_response = llm.invoke([HumanMessage(content=update_prompt)])
+            raw = update_response.content.strip()
+            if raw.startswith("```"):
+                raw = raw.split("```")[1]
+                if raw.startswith("json"):
+                    raw = raw[4:]
+            update_data = json.loads(raw.strip())
+            idx = update_data.get("index", 0) - 1
+            new_status = update_data.get("new_status", "")
+
+            if 0 <= idx < len(tracked) and new_status:
+                old_status = tracked[idx]["status"]
+                tracked[idx]["status"] = new_status
+                state["tracked_applications"] = tracked
+                response = f"Updated **{tracked[idx]['name']}** from {old_status} → **{new_status}**"
+            else:
+                response = "I couldn't find that scholarship in your tracker. Say 'show my tracker' to see your list."
+        except Exception as e:
+            print(f" Update failed: {e}")
+            response = "I couldn't process that update. Try saying 'update scholarship 1 to Submitted'."
+
+        state["messages"].append({"role": "assistant", "content": response})
+
+    # Step 4 — SHOW tracker in chat
+    elif tracker_intent == "show":
+        if not tracked:
+            response = "Your tracker is empty! First find some scholarships, then say 'add scholarship 1 and 2 to my tracker'."
+        else:
+            lines = ["Here's your application tracker:\n"]
+            lines.append("| # | Scholarship | Country | Status | Deadline | Date Added |")
+            lines.append("|---|-------------|---------|--------|----------|------------|")
+            for i, t in enumerate(tracked, 1):
+                lines.append(
+                    f"| {i} | {t['name'][:40]} | {t['country']} | "
+                    f"**{t['status']}** | {t['deadline']} | {t['date_added']} |"
+                )
+            response = "\n".join(lines)
+
+        state["messages"].append({"role": "assistant", "content": response})
+
+    # Step 5 — EXPORT to Excel
+    elif tracker_intent == "export":
+        if not tracked:
+            response = "Your tracker is empty — nothing to export yet!"
+            state["messages"].append({"role": "assistant", "content": response})
+        else:
+            try:
+                import pandas as pd
+                df = pd.DataFrame(tracked)
+                export_path = "scholarship_tracker.xlsx"
+                df.to_excel(export_path, index=False)
+                state["tracker_export_path"] = export_path
+                response = f"Your tracker has been exported! Download it from: **{export_path}**"
+            except Exception as e:
+                response = f"Export failed: {e}"
+            state["messages"].append({"role": "assistant", "content": response})
+
+    return state
 # profile collectorr
 def validate_profile_answer(field, answer):
     prompt = f"""
@@ -1499,6 +1807,7 @@ def profile_collector_agent(state: ScholarshipSystemState) -> ScholarshipSystemS
 # FORMAT RESPONSE
 def format_agent_response(state: ScholarshipSystemState, previous_message_count: int = 0) -> str:
     intent = state.get("user_intent")
+
     all_messages   = state.get("messages", [])
     new_messages   = all_messages[previous_message_count:]
     assistant_msgs = [m for m in new_messages if m.get("role") == "assistant"]
@@ -1509,16 +1818,20 @@ def format_agent_response(state: ScholarshipSystemState, previous_message_count:
         advisor_response = state.get("advisor_response", "")
         if advisor_response:
             return advisor_response
+
         if assistant_msgs:
             return assistant_msgs[-1]["content"]
+
         scholarships = state.get("scholarships_found", [])
         if not scholarships:
             return "I couldn't find any scholarships matching your profile. Try rephrasing or specifying a different country."
+
         seen, unique = set(), []
         for s in scholarships:
             if s["name"] not in seen:
                 seen.add(s["name"])
                 unique.append(s)
+
         lines = ["Here are scholarships I found for you:\n"]
         for i, s in enumerate(unique[:8], 1):
             lines.append(f"**{i}. {s['name']}**")
@@ -1526,20 +1839,51 @@ def format_agent_response(state: ScholarshipSystemState, previous_message_count:
             lines.append(f"   {s['url']}\n")
         return "\n".join(lines)
 
+    # requirements agent
     elif intent == "check_requirements":
         if assistant_msgs:
             return assistant_msgs[-1]["content"]
-        return "I couldn't find requirements. Please specify a university."
 
+        requirements = state.get("university_requirements", {})
+        if not requirements:
+            return "I couldn't find requirements. Please specify a university, e.g. 'requirements for MIT'."
+
+        lines = []
+        for uni, req in requirements.items():
+            deadline = req.get("deadline") or "not specified — verify at official website"
+            gpa      = req.get("gpa_requirement") or "not specified — verify at official website"
+            docs     = req.get("required_documents") or []
+
+            if isinstance(deadline, dict):
+                deadline = " | ".join(f"{k.title()}: {v}" for k, v in deadline.items())
+
+            lines.append(f" **{uni}**")
+            lines.append(f" Deadline: {deadline}")
+            lines.append(f"GPA: {gpa}")
+            lines.append(f" Documents: {', '.join(docs) if docs else 'not specified'}")
+            if req.get("tuition"):
+                lines.append(f" Tuition: {req['tuition']}")
+            if req.get("funding"):
+                lines.append(f" Funding: {req['funding']}")
+            if req.get("apply_url"):
+                lines.append(f" Apply: {req['apply_url']}")
+            if req.get("notes"):
+                lines.append(f" Notes: {str(req['notes'])[:200]}")
+            lines.append("")
+        return "\n".join(lines)
+
+    # Faculty agent
     elif intent == "find_faculty":
         if assistant_msgs:
             return assistant_msgs[-1]["content"]
+
         matched = state.get("matched_faculty", {})
         if not matched:
             return "I couldn't find any matching faculty. Try specifying a university and research area."
+
         lines = []
         for uni, faculty_list in matched.items():
-            lines.append(f"**{uni}**\n")
+            lines.append(f" **{uni}**\n")
             for f in faculty_list:
                 if f.get("match_score", 0) < 3:
                     continue
@@ -1556,14 +1900,24 @@ def format_agent_response(state: ScholarshipSystemState, previous_message_count:
                 lines.append("")
         return "\n".join(lines) if lines else "No strong faculty matches found."
 
+
+    elif intent == "track_application":
+        if assistant_msgs:
+            return assistant_msgs[-1]["content"]
+        return "I couldn't process your tracker request. Please try again."
+        # general chat
     return assistant_msgs[-1]["content"] if assistant_msgs else ""
 
-# graph
 def router_entry(state: ScholarshipSystemState) -> str:
+    """
+    Entry point router : decides whether to collect profile or go straight to supervisor.
+    """
     if state.get("profile_complete"):
         return "supervisor_node"
     return "profile_collector"
-memory   = MemorySaver()
+
+# graph
+memory = MemorySaver()
 workflow = StateGraph(ScholarshipSystemState)
 
 workflow.add_node("profile_collector", profile_collector_agent)
@@ -1571,6 +1925,8 @@ workflow.add_node("supervisor_node", supervisor_node)
 workflow.add_node("opportunity_agent", opportunity_agent)
 workflow.add_node("requirements_agent", requirements_agent)
 workflow.add_node("faculty_agent", faculty_agent)
+workflow.add_node("tracker_agent", tracker_agent)
+
 workflow.add_node("entry", lambda state: state)
 workflow.set_entry_point("entry")
 
@@ -1584,6 +1940,7 @@ workflow.add_conditional_edges(
     "profile_collector",
     lambda state: "supervisor_node" if state.get("profile_complete") else END,
     {"supervisor_node": "supervisor_node", END: END})
+
 workflow.add_conditional_edges(
     "supervisor_node",
     route_from_supervisor,
@@ -1591,17 +1948,24 @@ workflow.add_conditional_edges(
         "opportunity_agent":  "opportunity_agent",
         "requirements_agent": "requirements_agent",
         "faculty_agent":      "faculty_agent",
+          "tracker_agent":      "tracker_agent",
         END:                  END,
-   \ })
+    })
 workflow.add_edge("opportunity_agent", END)
 workflow.add_edge("requirements_agent", END)
 workflow.add_edge("faculty_agent", END)
+workflow.add_edge("tracker_agent", END)
+
 app = workflow.compile(checkpointer=memory)
 print(" Graph compiled")
-THREAD_ID = "gradio_session_1"
+
+app = workflow.compile(checkpointer=memory)
+THREAD_ID = "local_session_1"
 
 # the_Chat_function
 def chat_with_agent(message, history):
+    print(f"DEBUG - message: {message}")
+    print(f"DEBUG - history: {history}")
 
     if "state" not in chat_with_agent.__dict__:
         chat_with_agent.state = {
@@ -1625,30 +1989,48 @@ def chat_with_agent(message, history):
             "is_followup_response":    False,
             "advisor_response":        "",
             "application_progress":    {},
-            "errors":                  []
+            "errors":                  [],
+            "tracked_applications":    [],
+        "tracker_export_path":     None,
         }
+
     state = chat_with_agent.state
+
+    # Reset per-turn flags BEFORE invoke
     state["universities"]         = []
     state["is_followup_response"] = False
     state["advisor_response"]     = ""
     state["user_intent"]          = None
+    state["tracker_export_path"]  = None
 
+    #  Capture count before appending user message
     previous_message_count = len(state["messages"])
     state["messages"].append({"role": "user", "content": message})
-    result = app.invoke(
-        state,
-        config={"configurable": {"thread_id": THREAD_ID}}
-    )
+
+    try:
+        result = app.invoke(
+            state,
+            config={"configurable": {"thread_id": THREAD_ID}}
+        )
+    except Exception as e:
+        print(f"Invoke error: {e}")
+        return f"Error: {e}"
+
     chat_with_agent.state = result
 
+    # Only look at messages added this turn
     new_messages       = result["messages"][previous_message_count:]
     new_assistant_msgs = [m for m in new_messages if m["role"] == "assistant"]
+
+    #  Opportunity agent uses advisor_response state field
     formatted = format_agent_response(result, previous_message_count)
     if formatted:
         return formatted
 
+    #Fallback to new assistant messages (profile collector etc.)
     if new_assistant_msgs:
         return new_assistant_msgs[-1]["content"]
+
     return "I couldn't generate a response. Please try again."
 
 # The gradio UI
