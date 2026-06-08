@@ -28,6 +28,7 @@ ScholarshipAgent is a multi-agent AI system built with LangGraph that you intera
    Finds professors whose research matches your interests
 
 5. **Tracker Agent**
+
    Tracks your application progress and helps manage universities, scholarships, and application status updates
 
 
