@@ -495,7 +495,7 @@ def search_requirements(university=None, program=None, degree_level="Masters", s
                 except Exception as e:
                     print(f"   Search failed for '{query[:50]}': {e}")
 
-            # ── Fetch full page content from top URLs ─────────────────────────
+            #  Fetch full page content from top URLs 
             full_page_texts = []
             seen_fetch_urls = set()
 
@@ -505,7 +505,7 @@ def search_requirements(university=None, program=None, degree_level="Masters", s
                 if not url or url == "tavily_synthesised" or url in seen_fetch_urls:
                     continue
                 if url.endswith(".pdf") or "/pdf/" in url.lower():
-                    print(f"   ⏭️  Skipping PDF: {url[:60]}")
+                    print(f"   Skipping PDF: {url[:60]}")
                     continue
                 seen_fetch_urls.add(url)
                 try:
