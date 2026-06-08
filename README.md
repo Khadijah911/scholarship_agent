@@ -1,4 +1,4 @@
-# ScholarshipAgent — An AI-Powered Study Abroad Research Assistant
+# ScholarshipAgent: An AI-Powered Study Abroad Research Assistant
 
 ## The Story Behind This Project
 
@@ -8,7 +8,6 @@ Finding the right university, figuring out their exact GPA requirement, hunting 
 
 I built this ScholarshipAgent because I wished something like this existed when I was going through it. A tool that does not just point you to a website but actually reads it, extracts what matters, and talks to you like a knowledgeable friend who has done all the research already.
 
----
 
 ## What the ScholarshipAgent Does
 
@@ -28,7 +27,7 @@ ScholarshipAgent is a multi-agent AI system built with LangGraph that you intera
 4. **Faculty Agent**  
    Finds professors whose research matches your interests  
 
----
+
 
 ## Sample Conversations
 
@@ -38,7 +37,6 @@ ScholarshipAgent is a multi-agent AI system built with LangGraph that you intera
 **User:** What are the application requirements for University of Melbourne?  
 **Agent:** Requires WAM of 75%, deadline May 31 2026, tuition AUD $62,976/year...
 
----
 
 ## Setup & Installation
 
